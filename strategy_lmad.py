@@ -32,8 +32,8 @@ Mathematical Pipeline (per layer l, across K clients)
 4. **MAD (Median Absolute Deviation)**:
        MAD^(l) = Median( |d_k^(l) - d_tilde^(l)| )  for k = 1..K
 
-5. **Anomaly Score**:
-       S_k^(l) = d_k^(l) / (MAD^(l) + epsilon)
+5. **Anomaly Score** (modified z-score):
+       S_k^(l) = |d_k^(l) - d_tilde^(l)| / (MAD^(l) + epsilon)
 
 6. **Zero-Trust Gate**: If S_k^(l) > tau, **reject** layer l from
    client k.  Otherwise, accept it for aggregation.
@@ -270,17 +270,24 @@ class FedLMAD(FedAvg):
 
             # ----------------------------------------------------------
             # 2f. Compute anomaly score for each client.
-            #     S_k = d_k / (MAD + epsilon)
+            #     S_k = |d_k - d_tilde| / (MAD + epsilon)
             #
-            #     This score normalises each client's distance by the
-            #     expected spread.  A high score means the client is
-            #     anomalously far from the consensus — a potential
-            #     Byzantine actor (for this specific layer).
+            #     This is the modified z-score: it measures how many
+            #     MADs each client's distance deviates from the median
+            #     distance.  A score > tau means the client's update is
+            #     an outlier *relative to the spread of the population*.
+            #
+            #     Using raw d_k / MAD would cause all clients to be
+            #     rejected whenever MAD ≈ 0 (tight cluster of distances),
+            #     which happens naturally as training converges and all
+            #     clients update in similar directions.  The deviation
+            #     |d_k - d_tilde| stays small for honest clients even
+            #     when MAD is small, so the score correctly remains low.
             #
             #     epsilon prevents division by zero when MAD = 0
             #     (perfect consensus among all clients).
             # ----------------------------------------------------------
-            scores = distances / (mad + self.epsilon)
+            scores = abs_deviations / (mad + self.epsilon)
             print(f"  Anomaly scores: {np.round(scores, 4)}")
 
             # ----------------------------------------------------------

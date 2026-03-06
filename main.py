@@ -48,7 +48,7 @@ import numpy as np
 import torch
 
 import flwr as fl
-from flwr.common import NDArrays, Scalar, ndarrays_to_parameters
+from flwr.common import NDArrays, Scalar, ndarrays_to_parameters, Context
 from flwr.server import ServerConfig
 from flwr.server.strategy import FedAvg
 
@@ -77,20 +77,19 @@ MALICIOUS_IDS = set(range(NUM_MALICIOUS))
 # create a client.  The ``cid`` parameter is a string representation of
 # the client's partition ID (0 through NUM_CLIENTS-1).
 #
-# Flower 1.26.1 auto-detects the old-style ``cid: str`` signature and
-# wraps it in a Context adaptor internally, so this simple signature works
-# with the legacy start_simulation API.  The adaptor maps:
-#   cid = context.node_config["partition-id"]  (values "0" through "9")
+# Flower's start_simulation calls this function with a Context object.
+# The partition ID is read from context.node_config["partition-id"]
+# (values 0 through NUM_CLIENTS-1).
 # ──────────────────────────────────────────────────────────────────────────────
-def client_fn(cid: str) -> fl.client.Client:
+def client_fn(context: Context) -> fl.client.Client:
     """
     Create and return a Flower Client for the given client ID.
 
     Parameters
     ----------
-    cid : str
-        Client partition ID as a string ("0" through "9").
-        Assigned by Flower's simulation engine from
+    context : Context
+        Flower context object containing node configuration.
+        The partition ID is read from
         ``context.node_config["partition-id"]``.
 
     Returns
@@ -99,7 +98,7 @@ def client_fn(cid: str) -> fl.client.Client:
         A wrapped NumPyClient — either normal or malicious depending
         on whether this client's ID is in MALICIOUS_IDS.
     """
-    partition_id = int(cid)
+    partition_id = int(context.node_config["partition-id"])
 
     if partition_id in MALICIOUS_IDS:
         # Clients 0, 1, 2 → Malicious (Dog→Cat label flip)
@@ -223,6 +222,7 @@ def save_results(
     history: fl.server.history.History,
     strategy_name: str,
     output_dir: str = "results",
+    extra_metadata: Optional[Dict] = None,
 ) -> str:
     """
     Save simulation metrics to a JSON file for thesis plotting.
@@ -230,7 +230,8 @@ def save_results(
     The output file contains:
       - Per-round centralized accuracy and loss
       - Per-round distributed (client-averaged) loss
-      - Simulation metadata (strategy, clients, rounds, timestamp)
+      - L-MAD per-layer rejection metrics (if present)
+      - Simulation metadata (strategy, clients, rounds, tau, timestamp)
 
     Parameters
     ----------
@@ -240,6 +241,9 @@ def save_results(
         "fedavg" or "lmad" — used in the filename.
     output_dir : str
         Directory to save results in (created if it doesn't exist).
+    extra_metadata : dict, optional
+        Additional key-value pairs merged into the metadata block
+        (e.g. ``{"tau": 3.0, "num_rounds": 10}``).
 
     Returns
     -------
@@ -285,6 +289,14 @@ def save_results(
                 "accuracy": float(acc_val),
             })
 
+    # ---- Extract distributed fit metrics (L-MAD per-layer rejection stats) ----
+    lmad_metrics: Dict[str, list] = {}
+    if hasattr(history, "metrics_distributed_fit"):
+        for key, values in history.metrics_distributed_fit.items():
+            lmad_metrics[key] = [
+                {"round": int(r), "value": float(v)} for r, v in values
+            ]
+
     # ---- Build the results dictionary ----
     results = {
         "metadata": {
@@ -294,11 +306,13 @@ def save_results(
             "malicious_ids": sorted(MALICIOUS_IDS),
             "timestamp": datetime.now().isoformat(),
             "device": str(DEVICE),
+            **(extra_metadata or {}),
         },
         "centralized_accuracy": centralized_accuracy,
         "centralized_loss": centralized_loss,
         "distributed_loss": distributed_loss,
         "distributed_accuracy": distributed_accuracy,
+        "lmad_metrics": lmad_metrics,
     }
 
     # ---- Write to JSON ----
@@ -424,6 +438,10 @@ def main():
     filepath = save_results(
         history=history,
         strategy_name=args.strategy,
+        extra_metadata={
+            "num_rounds": args.rounds,
+            "tau": args.tau if args.strategy == "lmad" else None,
+        },
     )
 
     # ---- Print final summary ----
